@@ -1,11 +1,45 @@
 # Secrets — never commit these
 .env
-*.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
 *.key
 *.pem
 *.pfx
 
-# Local output
+# Node dependencies
+node_modules
+.pnp
+.pnp.js
+package-lock.json
+
+# Build output
+build
+.next
+out
+
+# Testing
+coverage
+
+# Logs
 *.log
-Thumbs.db
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+debug.log
+app.log
+
+# Editor / OS
 .DS_Store
+.eslintcache
+.idea
+Thumbs.db
+
+# AI rules
+.*/rules
+AGENTS.md
+
+# Azurite
+__*
+AzuriteConfig
