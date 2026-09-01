@@ -11,8 +11,14 @@ import {
   InputAdornment,
   Portal,
   Button,
+  Chip,
+  List,
+  ListItemButton,
+  ListItemIcon,
+  ListSubheader,
+  Stack,
 } from "@mui/material";
-import { Search as SearchIcon } from "@mui/icons-material";
+import { Search as SearchIcon, Star as StarIcon } from "@mui/icons-material";
 import { ApiGetCall } from "../../api/ApiCall";
 import { useRouter } from "next/router";
 import { BulkActionsMenu } from "../bulk-actions-menu";
@@ -20,6 +26,9 @@ import { CippOffCanvas } from "../CippComponents/CippOffCanvas";
 import { CippBitlockerKeySearch } from "../CippComponents/CippBitlockerKeySearch";
 import { nativeMenuItems } from "../../layouts/config";
 import { usePermissions } from "../../hooks/use-permissions";
+import { useIsMobileLayout } from "../../hooks/use-breakpoint";
+import { useUserBookmarks } from "../../hooks/use-user-bookmarks";
+import { searchLocalLicenseCatalog } from "../../utils/get-cipp-license-catalog";
 
 function getLeafItems(items = []) {
   let result = [];
@@ -40,6 +49,9 @@ async function loadTabOptions() {
     "/email/administration/exchange-retention",
     "/cipp/custom-data",
     "/cipp/advanced/super-admin",
+    "/cipp/advanced/container-management",
+    "/cipp/advanced/authentication",
+    "/endpoint/MEM/enrollment-profiles",
     "/tenant/standards",
     "/tenant/manage",
     "/tenant/administration/applications",
@@ -110,6 +122,7 @@ export const CippUniversalSearchV2 = React.forwardRef(
     {
       onConfirm = () => {},
       onChange = () => {},
+      onLicenseSelect,
       maxResults = 10,
       value = "",
       autoFocus = false,
@@ -135,6 +148,8 @@ export const CippUniversalSearchV2 = React.forwardRef(
     const dropdownRef = useRef(null);
     const router = useRouter();
     const { userPermissions, userRoles } = usePermissions();
+    const isMobile = useIsMobileLayout();
+    const { bookmarks } = useUserBookmarks();
 
     const universalSearch = ApiGetCall({
       url: `/api/ExecUniversalSearchV2`,
@@ -146,6 +161,14 @@ export const CippUniversalSearchV2 = React.forwardRef(
       queryKey: `searchV2-${searchType}-${searchValue}`,
       waiting: false,
     });
+
+    // Local-first license lookup. The frontend ships the full Microsoft SKU
+    // catalog in M365Licenses.json, so for the Licenses type we match locally
+    // and only fall back to the API when the catalog has no hit.
+    const localLicenseResults = useMemo(() => {
+      if (searchType !== "Licenses") return [];
+      return searchLocalLicenseCatalog(searchValue, maxResults);
+    }, [searchType, searchValue, maxResults]);
 
     const bitlockerSearch = ApiGetCall({
       url: "/api/ExecBitlockerSearch",
@@ -271,12 +294,21 @@ export const CippUniversalSearchV2 = React.forwardRef(
       } else if (searchType === "Pages") {
         updateDropdownPosition();
         setShowDropdown(true);
+      } else if (searchType === "Licenses") {
+        // Local catalog is in-memory, so reveal results as the user types.
+        // The API fallback still requires the Search button (handleSearch).
+        updateDropdownPosition();
+        setShowDropdown(true);
       }
     };
 
     const updateDropdownPosition = () => {
-      if (textFieldRef.current) {
-        const rect = textFieldRef.current.getBoundingClientRect();
+      // Anchored to the whole joined control, not the field inset within it: results then
+      // span the full search width instead of starting past the scope button, which is
+      // what was clipping every email, UPN and route path.
+      const anchor = containerRef.current ?? textFieldRef.current;
+      if (anchor) {
+        const rect = anchor.getBoundingClientRect();
         const availableHeight = Math.max(220, window.innerHeight - rect.bottom - 16);
         setDropdownPosition({
           top: rect.bottom + window.scrollY + 4,
@@ -330,7 +362,12 @@ export const CippUniversalSearchV2 = React.forwardRef(
     const handleSearch = () => {
       if (searchValue.length > 0) {
         updateDropdownPosition();
-        if (searchType !== "Pages") {
+        if (searchType === "Licenses") {
+          // Only hit the API when the local catalog produced nothing.
+          if (localLicenseResults.length === 0) {
+            activeSearch?.refetch();
+          }
+        } else if (searchType !== "Pages") {
           activeSearch?.refetch();
         }
         setShowDropdown(true);
@@ -348,8 +385,22 @@ export const CippUniversalSearchV2 = React.forwardRef(
         router.push(
           `/identity/administration/groups/group?groupId=${itemData.id}&tenantFilter=${tenantDomain}`,
         );
+      } else if (searchType === "Applications") {
+        if (match.Type === "Apps") {
+          router.push(
+            `/tenant/administration/applications/app-registration?appId=${itemData.appId || itemData.id}&tenantFilter=${tenantDomain}`,
+          );
+        } else {
+          router.push(
+            `/tenant/administration/applications/enterprise-app?spId=${itemData.id}&tenantFilter=${tenantDomain}`,
+          );
+        }
       } else if (searchType === "Pages") {
         router.push(match.path, undefined, { shallow: true });
+      } else if (searchType === "Licenses") {
+        if (typeof onLicenseSelect === "function") {
+          onLicenseSelect(itemData);
+        }
       }
       setSearchValue("");
       setShowDropdown(false);
@@ -381,7 +432,7 @@ export const CippUniversalSearchV2 = React.forwardRef(
     const typeMenuActions = [
       {
         label: "Users",
-        icon: "UsersIcon",
+        icon: "Groups",
         onClick: () => handleTypeChange("Users"),
       },
       {
@@ -390,13 +441,23 @@ export const CippUniversalSearchV2 = React.forwardRef(
         onClick: () => handleTypeChange("Groups"),
       },
       {
+        label: "Applications",
+        icon: "Apps",
+        onClick: () => handleTypeChange("Applications"),
+      },
+      {
+        label: "Licenses",
+        icon: "VpnKey",
+        onClick: () => handleTypeChange("Licenses"),
+      },
+      {
         label: "BitLocker",
         icon: "FilePresent",
         onClick: () => handleTypeChange("BitLocker"),
       },
       {
         label: "Pages",
-        icon: "GlobeAltIcon",
+        icon: "Public",
         onClick: () => handleTypeChange("Pages"),
       },
     ];
@@ -420,7 +481,10 @@ export const CippUniversalSearchV2 = React.forwardRef(
         if (
           containerRef.current &&
           !containerRef.current.contains(event.target) &&
-          !event.target.closest("[data-dropdown-portal]")
+          !event.target.closest("[data-dropdown-portal]") &&
+          // the in-flow mobile results are outside the joined control — this ran on
+          // mousedown and unmounted a row before its click could navigate
+          !event.target.closest("[data-search-results]")
         ) {
           setShowDropdown(false);
         }
@@ -447,7 +511,8 @@ export const CippUniversalSearchV2 = React.forwardRef(
           window.removeEventListener("resize", handleResize);
         };
       }
-    }, [showDropdown]);
+      // isMobile changes the search button's width, so the anchor's box changes with it
+    }, [showDropdown, isMobile]);
 
     useEffect(() => {
       setHighlightedIndex(-1);
@@ -482,18 +547,28 @@ export const CippUniversalSearchV2 = React.forwardRef(
       ? bitlockerSearch.data.Results
       : [];
     const universalResults = Array.isArray(universalSearch?.data) ? universalSearch.data : [];
+    const licenseResults =
+      searchType === "Licenses"
+        ? localLicenseResults.length > 0
+          ? localLicenseResults
+          : universalResults
+        : universalResults;
     const activeResults =
       searchType === "BitLocker"
         ? bitlockerResults
         : searchType === "Pages"
           ? pageResults
-          : universalResults;
+          : searchType === "Licenses"
+            ? licenseResults
+            : universalResults;
     const hasResults =
       searchType === "BitLocker"
         ? bitlockerResults.length > 0
         : searchType === "Pages"
           ? pageResults.length > 0
-          : universalResults.length > 0;
+          : searchType === "Licenses"
+            ? licenseResults.length > 0
+            : universalResults.length > 0;
     const shouldShowDropdown = showDropdown && searchValue.length > 0;
 
     const getLabel = () => {
@@ -507,24 +582,101 @@ export const CippUniversalSearchV2 = React.forwardRef(
           : "Search BitLocker by Recovery Key ID";
       } else if (searchType === "Pages") {
         return "Search pages, tabs, paths, or scope";
+      } else if (searchType === "Licenses") {
+        return "Search licenses by SKU ID, part number, name, or service plan";
       }
       return "Search";
     };
 
+    // One results body, two surfaces: desktop anchors it under the joined control as a
+    // floating panel; the phone dialog IS the surface, so it renders in flow.
+    const resultsBody = (
+      <>
+              {activeSearch?.isFetching ? (
+                <Box sx={{ p: 2 }}>
+                  <Skeleton height={60} sx={{ mb: 1 }} />
+                  <Skeleton height={60} />
+                </Box>
+              ) : hasResults ? (
+                searchType === "BitLocker" ? (
+                  <BitlockerResults
+                    items={bitlockerResults}
+                    onResultClick={handleBitlockerResultClick}
+                    highlightedIndex={highlightedIndex}
+                    setHighlightedIndex={setHighlightedIndex}
+                  />
+                ) : searchType === "Pages" ? (
+                  <PageResults
+                    items={pageResults}
+                    searchValue={searchValue}
+                    onResultClick={handleResultClick}
+                    highlightedIndex={highlightedIndex}
+                    setHighlightedIndex={setHighlightedIndex}
+                  />
+                ) : (
+                  <Results
+                    items={searchType === "Licenses" ? licenseResults : universalResults}
+                    searchValue={searchValue}
+                    onResultClick={handleResultClick}
+                    searchType={searchType}
+                    highlightedIndex={highlightedIndex}
+                    setHighlightedIndex={setHighlightedIndex}
+                  />
+                )
+              ) : (
+                <Box sx={{ p: 3, textAlign: "center" }}>
+                  <Typography variant="body2" color="text.secondary">
+                    No results found.
+                  </Typography>
+                </Box>
+              )}
+      </>
+    );
+
     return (
       <>
-        <Box ref={containerRef} sx={{ width: "100%", display: "flex", gap: 1, alignItems: "flex-start" }}>
-          <BulkActionsMenu
-            buttonName={searchType}
-            actions={typeMenuActions}
-          />
-          {searchType === "BitLocker" && (
+        {/* One joined control: the scope button, the field and the search button share a
+            single bordered row, so they line up by construction and the results panel can
+            anchor to the whole row rather than to the field inset within it. */}
+        <Box
+          ref={containerRef}
+          sx={{
+            width: "100%",
+            display: "flex",
+            alignItems: "stretch",
+            "& > *": { flexShrink: 0 },
+            // Collapse the doubled borders where the controls meet
+            "& > * + *": { ml: "-1px" },
+            "& .MuiButton-root": { borderRadius: 0, whiteSpace: "nowrap" },
+            "& > :first-of-type .MuiButton-root, & > :first-of-type": {
+              borderTopLeftRadius: (theme) => theme.shape.borderRadius,
+              borderBottomLeftRadius: (theme) => theme.shape.borderRadius,
+            },
+            "& > :last-child .MuiButton-root, & > :last-child": {
+              borderTopRightRadius: (theme) => theme.shape.borderRadius,
+              borderBottomRightRadius: (theme) => theme.shape.borderRadius,
+            },
+            "& .MuiOutlinedInput-root": { borderRadius: 0, height: "100%" },
+            // The field is the only part that should absorb the leftover width
+            "& > .MuiFormControl-root": { flex: "1 1 auto", minWidth: 0 },
+            // Keep the focused field's outline on top of the adjacent borders
+            "& .MuiOutlinedInput-root.Mui-focused": { zIndex: 1 },
+          }}
+        >
+          {!isMobile && (
+            <BulkActionsMenu buttonName={searchType} actions={typeMenuActions} />
+          )}
+          {!isMobile && searchType === "BitLocker" && (
             <BulkActionsMenu
               buttonName={bitlockerLookupType === "deviceId" ? "Device ID" : "Key ID"}
               actions={bitlockerLookupActions}
             />
           )}
           <TextField
+            // The theme defaults TextField to the filled variant, whose own rounded border
+            // ignores every join rule above (they target .MuiOutlinedInput-root) — which is
+            // why the scope button and the field rendered as two separate boxes.
+            variant="outlined"
             ref={(node) => {
               textFieldRef.current = node;
               if (typeof ref === "function") {
@@ -567,15 +719,100 @@ export const CippUniversalSearchV2 = React.forwardRef(
               variant="contained"
               onClick={handleSearch}
               disabled={searchValue.length === 0 || activeSearch?.isFetching}
-              startIcon={<SearchIcon />}
-              sx={{ flexShrink: 0 }}
+              startIcon={isMobile ? undefined : <SearchIcon />}
+              aria-label="Search"
+              // Icon-only on phones: the label costs the field width it needs more
+              sx={{ flexShrink: 0, minWidth: isMobile ? 48 : undefined, px: isMobile ? 0 : undefined }}
             >
-              Search
+              {isMobile ? <SearchIcon /> : "Search"}
             </Button>
           )}
         </Box>
 
-        {shouldShowDropdown && (
+        {/* One tap to any scope — the desktop dropdown cost two, and the recorded mobile
+            gap was that entity search had no direct entry point at all. */}
+        {isMobile && (
+          <Stack direction="row" useFlexGap flexWrap="wrap" spacing={1} sx={{ mt: 1.5 }}>
+            {typeMenuActions.map((action) => {
+              const active = action.label === searchType;
+              return (
+                <Chip
+                  key={action.label}
+                  label={action.label}
+                  color={active ? "primary" : "default"}
+                  variant={active ? "filled" : "outlined"}
+                  onClick={action.onClick}
+                  sx={{ height: 36, borderRadius: 999 }}
+                />
+              );
+            })}
+          </Stack>
+        )}
+        {isMobile && searchType === "BitLocker" && (
+          <Stack direction="row" useFlexGap flexWrap="wrap" spacing={1} sx={{ mt: 1 }}>
+            {bitlockerLookupActions.map((action) => {
+              const active =
+                (action.label === "Device ID") === (bitlockerLookupType === "deviceId");
+              return (
+                <Chip
+                  key={action.label}
+                  label={action.label}
+                  color={active ? "primary" : "default"}
+                  variant={active ? "filled" : "outlined"}
+                  onClick={action.onClick}
+                  sx={{ height: 36, borderRadius: 999 }}
+                />
+              );
+            })}
+          </Stack>
+        )}
+        {/* The phone dialog is the surface: results render in flow, and the dead space
+            before a query becomes the user's bookmarks. */}
+        {isMobile && shouldShowDropdown && (
+          <Box
+            data-search-results
+            sx={{
+              mt: 1.5,
+              overflowX: "hidden",
+              overflowWrap: "anywhere",
+              borderTop: 1,
+              borderColor: "divider",
+            }}
+          >
+            {resultsBody}
+          </Box>
+        )}
+        {isMobile && !shouldShowDropdown && (bookmarks?.length ?? 0) > 0 && (
+          <List
+            sx={{ mt: 1.5, py: 0, borderTop: 1, borderColor: "divider" }}
+            subheader={
+              <ListSubheader disableSticky sx={{ bgcolor: "transparent", px: 0 }}>
+                Bookmarks
+              </ListSubheader>
+            }
+          >
+            {bookmarks.map((bookmark) => (
+              <ListItemButton
+                key={bookmark.path}
+                sx={{ minHeight: 48, px: 0.5 }}
+                onClick={() => {
+                  router.push(bookmark.path);
+                  onConfirm(bookmark);
+                }}
+              >
+                <ListItemIcon sx={{ minWidth: 40 }}>
+                  <StarIcon fontSize="small" color="primary" />
+                </ListItemIcon>
+                <ListItemText
+                  primary={bookmark.label}
+                  secondary={bookmark.category || undefined}
+                  primaryTypographyProps={{ noWrap: true }}
+                />
+              </ListItemButton>
+            ))}
+          </List>
+        )}
+        {!isMobile && shouldShowDropdown && (
           <Portal>
             <Paper
               data-dropdown-portal
@@ -587,51 +824,19 @@ export const CippUniversalSearchV2 = React.forwardRef(
                 left: `${dropdownPosition.left}px`,
                 width: `${dropdownPosition.width}px`,
                 maxHeight: `${dropdownMaxHeight}px`,
-                overflow: "auto",
+                overflowY: "auto",
+                // Emails, UPNs and route paths are single unbreakable tokens: whiteSpace
+                // normal can't wrap them, so without this they widen the panel and the
+                // result text runs off the right edge.
+                overflowX: "hidden",
+                overflowWrap: "anywhere",
                 zIndex: 9999,
                 boxShadow: 3,
                 border: "1px solid",
                 borderColor: "divider",
               }}
             >
-              {activeSearch?.isFetching ? (
-                <Box sx={{ p: 2 }}>
-                  <Skeleton height={60} sx={{ mb: 1 }} />
-                  <Skeleton height={60} />
-                </Box>
-              ) : hasResults ? (
-                searchType === "BitLocker" ? (
-                  <BitlockerResults
-                    items={bitlockerResults}
-                    onResultClick={handleBitlockerResultClick}
-                    highlightedIndex={highlightedIndex}
-                    setHighlightedIndex={setHighlightedIndex}
-                  />
-                ) : searchType === "Pages" ? (
-                  <PageResults
-                    items={pageResults}
-                    searchValue={searchValue}
-                    onResultClick={handleResultClick}
-                    highlightedIndex={highlightedIndex}
-                    setHighlightedIndex={setHighlightedIndex}
-                  />
-                ) : (
-                  <Results
-                    items={universalResults}
-                    searchValue={searchValue}
-                    onResultClick={handleResultClick}
-                    searchType={searchType}
-                    highlightedIndex={highlightedIndex}
-                    setHighlightedIndex={setHighlightedIndex}
-                  />
-                )
-              ) : (
-                <Box sx={{ p: 3, textAlign: "center" }}>
-                  <Typography variant="body2" color="text.secondary">
-                    No results found.
-                  </Typography>
-                </Box>
-              )}
+              {resultsBody}
             </Paper>
           </Portal>
         )}
@@ -685,6 +890,85 @@ const Results = ({
         const itemData = match.Data || {};
         const tenantDomain = match.Tenant || "";
 
+        if (searchType === "Licenses") {
+          const servicePlans = Array.isArray(itemData.servicePlans) ? itemData.servicePlans : [];
+          const planNames = servicePlans
+            .map((p) => p?.servicePlanName)
+            .filter(Boolean)
+            .join(", ");
+          return (
+            <MenuItem
+              key={match.RowKey || index}
+              data-result-index={index}
+              onClick={() => onResultClick(match)}
+              onMouseEnter={() => setHighlightedIndex(index)}
+              selected={highlightedIndex === index}
+              sx={{
+                py: 1.5,
+                px: 2,
+                borderBottom: index < items.length - 1 ? "1px solid" : "none",
+                borderColor: "divider",
+                alignItems: "flex-start",
+                whiteSpace: "normal",
+                backgroundColor: highlightedIndex === index ? "action.selected" : "transparent",
+                "&:hover": { backgroundColor: "action.hover" },
+              }}
+            >
+              <ListItemText
+                primary={
+                  <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap" }}>
+                    <Typography variant="body1" fontWeight="medium">
+                      {highlightMatch(itemData.displayName || itemData.skuPartNumber || "Unknown SKU")}
+                    </Typography>
+                    {itemData.skuPartNumber && (
+                      <Typography
+                        variant="caption"
+                        sx={{ fontFamily: "monospace", color: "text.secondary" }}
+                      >
+                        {highlightMatch(itemData.skuPartNumber)}
+                      </Typography>
+                    )}
+                  </Box>
+                }
+                secondary={
+                  <Box>
+                    {itemData.skuId && (
+                      <Typography
+                        variant="body2"
+                        sx={{ fontFamily: "monospace", color: "text.secondary" }}
+                      >
+                        {highlightMatch(itemData.skuId)}
+                      </Typography>
+                    )}
+                    <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>
+                      {itemData.tenantCount || 0} tenant{itemData.tenantCount === 1 ? "" : "s"}
+                      {" · "}
+                      {itemData.totalAssigned || 0}/{itemData.totalAvailable || 0} assigned
+                      {servicePlans.length > 0 && ` · ${servicePlans.length} service plan${servicePlans.length === 1 ? "" : "s"}`}
+                    </Typography>
+                    {planNames && (
+                      <Typography
+                        variant="caption"
+                        color="text.secondary"
+                        sx={{
+                          display: "-webkit-box",
+                          mt: 0.5,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          WebkitLineClamp: 2,
+                          WebkitBoxOrient: "vertical",
+                        }}
+                      >
+                        {highlightMatch(planNames)}
+                      </Typography>
+                    )}
+                  </Box>
+                }
+              />
+            </MenuItem>
+          );
+        }
+
         return (
           <MenuItem
             key={match.RowKey || index}
@@ -726,6 +1010,20 @@ const Results = ({
                       {itemData.description && (
                         <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
                           {highlightMatch(itemData.description || "")}
+                        </Typography>
+                      )}
+                    </>
+                  )}
+                  {searchType === "Applications" && (
+                    <>
+                      {itemData.appId && (
+                        <Typography variant="body2" color="text.secondary">
+                          {highlightMatch(itemData.appId || "")}
+                        </Typography>
+                      )}
+                      {itemData.publisherName && (
+                        <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                          {highlightMatch(itemData.publisherName || "")}
                         </Typography>
                       )}
                     </>

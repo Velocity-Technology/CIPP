@@ -43,3 +43,5 @@ AGENTS.md
 # Azurite
 __*
 AzuriteConfig
+# Claude/Cursor worktrees and local AI tooling
+.claude/
